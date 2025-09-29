@@ -1,0 +1,16 @@
+#!/usr/bin/env zshctl
+
+source ${0:a:h}/config.zsh
+
+function execute {
+    eval "$(args -b ,config  -- "$@")"
+    if (( o_config )); then
+        config
+    elif [[ $MARGINAL_DUMP_BINDING = 1 ]]; then
+        jq < $BINDING_CONTEXT_PATH
+    else
+        print 'hello, world'
+    fi
+}
+
+# vim: ft=zsh :

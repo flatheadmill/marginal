@@ -1,0 +1,74 @@
+# There is going to be an upper limit to MarginalJob that you will probably
+# hit pretty quickly if you're creating too many. The rules are apparent to
+# me. Creating many MarginalJobs but for different types will probably be
+# affordable.
+apiVersion: marginal.flatheadmill.com/v1
+kind: MarginalJob
+metadata:
+  name: hello
+spec:
+  apiVersion: v1
+  kind: Secret
+  isNodeInitializer: false
+  # Label filters prevent a marginal job from running for an untracked object.
+  # With no match expressions, the marginal job runs for all objects.
+  objectFilter:
+    matchExpressions:
+    - key: kubernetes.io/os
+      operator: In
+      values: [ linux ]
+    - key: kubernetes.io/os
+      operator: Exists
+    - key: kubernetes.io/missing
+      operator: DoesNotExist
+    - key: kubernetes.io/os
+      operator: NotIn
+      values: [ beos, cpm, os2 ]
+  # Filter based on the namespace of the object. With no filters, matches all
+  # namespaces.
+  namespaceFilter: [ "*" ]
+  jobTemplateDefaults:
+    backoffLimit: 2
+    ttlSecondsAfterFinished: 3600
+  jobTemplates:
+  - name: upsert
+    executeHookOnEvent: [ Added, Modified ]
+    # A marginal job can respond to Flant Shell Operator events. This is `jq`.
+    # The marginal job will only run if the `jq` returns `1`.
+    modificationFilter: |
+      [
+          select(
+            .metadata.annotations["flatheadmill.com/modified"] != $cm.data[.metadata.name]?["flatheadmill.com/processed"]) )
+      ] | length
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: hello
+            image: alpine
+            command: [ sh ]
+            args:
+            - -c
+            - echo 'hello, world'; exit 1
+          - name: world
+            image: alpine
+            command: [ sh ]
+            args:
+            - -c
+            - echo 'hello, world'
+  - name: delete
+    executeHookOnEvent: [ Deleted ]
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: hello
+            image: alpine
+            command: [ sh ]
+            args:
+            - -c
+            - echo 'hello, world'; exit 1
