@@ -2,8 +2,11 @@
 
 source ${0:a:h}/config.zsh
 
-function execute {
+function :args {
     eval "$(args -b ,config  -- "$@")"
+}
+
+function :execute {
     if (( o_config )); then
         config
     elif [[ $MARGINAL_DUMP_BINDING = 1 ]]; then

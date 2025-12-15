@@ -38,7 +38,8 @@ spec:
     modificationFilter: |
       [
           select(
-            .metadata.annotations["flatheadmill.com/modified"] != $cm.data[.metadata.name]?["flatheadmill.com/processed"]) )
+            .metadata.annotations["step-reviewer.flatheadmill.com/modified"] != .metadata.annotations["flatheadmill.com/processed"])
+          )
       ] | length
     spec:
       template:

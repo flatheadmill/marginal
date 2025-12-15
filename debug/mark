@@ -2,7 +2,7 @@
 
 source ${0:a:h:h}/hooks/mark.zsh
 
-function execute {
+function :execute {
     mark "$@"
 }
 

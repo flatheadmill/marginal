@@ -12,7 +12,6 @@ function schedule {
             [
                 (.metadata.annotations // {}) as $annotations |
                 (.metadata.labels // {}) as $labels |
-                (.metadata | @json),
                 (.metadata.namespace // "default"),
                 .metadata.name,
                 .metadata.resourceVersion,
@@ -26,8 +25,8 @@ function schedule {
     set -- "${(@)tape}"
     typeset -A annotations labels
     integer annotation_count label_count
-    typeset metadata=${1:-} object_namespace=${2:-} object_name=${3:-} resource_version=${4:-} annotation_count=${5:-}
-    shift 5
+    typeset object_namespace=${1:-} object_name=${2:-} resource_version=${3:-} annotation_count=${4:-}
+    shift 4
     while (( annotation_count-- )); do
         annotations+=( "${@[1,2]}" )
         shift 2
@@ -53,8 +52,6 @@ function schedule {
                     (.metadata.name),
                     (.spec.apiVersion // ""),
                     (.spec.kind // ""),
-                    ($defaults | length) * 2,
-                    ($defaults | to_entries[] | (.key, .value)),
                     ($selectors | length),
                     ($selectors[] |
                         (.values // []) as $values |
@@ -67,27 +64,24 @@ function schedule {
                             (.name),
                             (.executeHookOnEvent // [] | length),
                             ((.executeHookOnEvent // [])[]),
-                            (.modificationFilter // ""),
+                            (.modificationFilter // "1"),
+                            (.env // "[]"),
                             (.patch // "."),
-                            (.spec | @json)
+                            (($defaults * .spec) | @json)
                     )
             ] | @sh
         '
     )}}" ) || abend 'cannot read CRD'
     set -- "${(@)tape}"
-    typeset -A manifests defaults
+    typeset -A manifests
     typeset namespace name direction template key operator values=() namespaces=()
-    integer defaults_count selector_count values_count hit namespace_count
+    integer selector_count values_count hit namespace_count
     typeset kind api_version slugged manifest
     integer template_count filtered on_count cm_exists
     typeset template_name template_namespace on=() jq cm_name cm_namespace
     while (( $# )); do
-        namespace=${1:-} name=${2:-} kind=${3:-} api_version=${4:-} defaults_count=${5:-}
+        namespace=${1:-} name=${2:-} kind=${3:-} api_version=${4:-} selector_count=${5:-}
         shift 5
-        defaults=( "$@[1,$defaults_count]" )
-        shift $defaults_count
-        selector_count=${1:-}
-        shift
         hit=1
         while (( selector_count-- )); do
             key=${1:-} operator=${2:-} values_count=${3:-}
@@ -132,25 +126,20 @@ function schedule {
             shift 2
             on=( "${(@A)@[1,$on_count]:l}" )
             shift $on_count
-            filter=${1:-} patch=${2:-} template=${3:-}
-            shift 3
+            filter=${1:-} env=${2:-} patch=${3:-} template=${4:-}
+            shift 4
             (( hit && $on[(Ie)$o_event_type] )) || continue
-            if [[ $o_event_type = modified && -n $filter ]]; then
+            if [[ $o_event_type = modified ]]; then
                 print would run jq
             fi
-            values=()
-            for key value in "${(@kv)defaults}"; do
-                values+=( $key=$value )
-            done
-            print "${(@)values}"
+            env=$(jq $env <<< $o_object) || abend 'cannot evaluate env'
             slugged=$name-$(slugged $object_namespace/$object_name)-$resource_version
             manifest=$(
                 jq --argjson args "$(
                     jo -- name=$name slugged=$slugged namespace=$namespace \
                         when=$(date --iso=ns) \
                         node=$object_name  \
-                        default="$(jo -- "${(@)values}" < /dev/null)" \
-                        -s metadata=$metadata
+                        env=$env
                     )" \
                 '
                     {
@@ -167,25 +156,23 @@ function schedule {
                             }
                         },
                         spec: (
-                            ($args.default * .) |
-                                .template.spec.containers[].env += [{
+                            . |
+                                .template.spec.containers[].env += ([{
                                     name: "MARGINAL_RESTART_PREVENTION",
                                     value: $args.when
-                                }, {
-                                    name: "MARGINAL_OBJECT_METADATA",
-                                    value: $args.metadata
-                                }]
+                                }] + $args.env)
                         )
                     }
                 ' <<< $template
             )
             manifests[$namespace/$name]=$(
-                gojq --yaml-output --argjson metadata "$(jq '.metadata' <<< $o_object)" \
-                    $patch <<< $manifest
+                gojq --yaml-output --argjson object $o_object $patch <<< $manifest
             )
         done
     done
     for manifest in "${(@v)manifests}"; do
+        print $manifests
+        continue
         if ! kubectl apply -f - <<< $manifest; then
             kubectl --namespace $namespace get job $slugged > /dev/null ||
                 abend 'unable to create job'
