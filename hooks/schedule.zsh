@@ -171,8 +171,6 @@ function schedule {
         done
     done
     for manifest in "${(@v)manifests}"; do
-        print $manifests
-        continue
         if ! kubectl apply -f - <<< $manifest; then
             kubectl --namespace $namespace get job $slugged > /dev/null ||
                 abend 'unable to create job'
