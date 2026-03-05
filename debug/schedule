@@ -4,7 +4,7 @@ source ${0:a:h:h}/hooks/schedule.zsh
 
 function :execute {
     eval "$(args -s ,event-type -- "$@")"
-    schedule --event-type $o_event_type --object "$("$@" | jq -c)"
+    MARGINAL_DRY_RUN=1 schedule --event-type $o_event_type --object "$("$@" | jq -c)"
 }
 
 # vim: ft=zsh :

@@ -66,6 +66,7 @@ function schedule {
                             ((.executeHookOnEvent // [])[]),
                             (.modificationFilter // "1"),
                             (.env // "[]"),
+                            (.uniqueKey // ""),
                             (.patch // "."),
                             (($defaults * .spec) | @json)
                     )
@@ -126,14 +127,29 @@ function schedule {
             shift 2
             on=( "${(@A)@[1,$on_count]:l}" )
             shift $on_count
-            filter=${1:-} env=${2:-} patch=${3:-} template=${4:-}
-            shift 4
+            filter=${1:-} env=${2:-} unique_key=${3:-} patch=${4:-} template=${5:-}
+            shift 5
             (( hit && $on[(Ie)$o_event_type] )) || continue
             if [[ $o_event_type = modified ]]; then
                 print would run jq
             fi
-            env=$(jq $env <<< $o_object) || abend 'cannot evaluate env'
-            slugged=$name-$(slugged $object_namespace/$object_name)-$resource_version
+            env=$(jq "$env" <<< $o_object) || abend 'cannot evaluate env'
+            env=$(jq 'if type == "object" then [to_entries[] | {name: .key, value: (.value | tostring)}] else . end' <<< "$env")
+            if [[ -z $unique_key ]]; then
+                case $o_event_type in
+                    modified) unique_key='.metadata.resourceVersion' ;;
+                    *)        unique_key='.metadata.uid' ;;
+                esac
+            fi
+            typeset unique_value
+            unique_value=$(jq -r "$unique_key" <<< $o_object)
+            slugged=$name-$template_name-$(slugged "$unique_value")
+            typeset annotation_key="marginal.flatheadmill.com/${name}-${template_name}"
+            typeset existing_annotation=$(jq -r ".metadata.annotations[\"${annotation_key}\"] // \"\"" <<< $o_object)
+            if [[ $existing_annotation == $slugged ]]; then
+                print "marginal: $object_name already processed for $name/$template_name, skipping"
+                continue
+            fi
             manifest=$(
                 jq --argjson args "$(
                     jo -- name=$name slugged=$slugged namespace=$namespace \
@@ -165,17 +181,18 @@ function schedule {
                     }
                 ' <<< $template
             )
-            manifests[$namespace/$name]=$(
+            manifest=$(
                 gojq --yaml-output --argjson object $o_object $patch <<< $manifest
             )
+            if (( MARGINAL_DRY_RUN )); then
+                print $manifest
+            elif kubectl apply -f - <<< $manifest; then
+                kubectl annotate --overwrite ${api_version:l} $object_name \
+                    "${annotation_key}=${slugged}" 2>/dev/null || true
+            else
+                kubectl --namespace $namespace get job $slugged > /dev/null ||
+                    abend 'unable to create job'
+            fi
         done
-    done
-    for manifest in "${(@v)manifests}"; do
-        print $manifests
-        continue
-        if ! kubectl apply -f - <<< $manifest; then
-            kubectl --namespace $namespace get job $slugged > /dev/null ||
-                abend 'unable to create job'
-        fi
     done
 }
