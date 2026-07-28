@@ -144,11 +144,36 @@ function schedule {
             typeset unique_value
             unique_value=$(jq -r "$unique_key" <<< $o_object)
             slugged=$name-$template_name-$(slugged "$unique_value")
-            typeset annotation_key="marginal.flatheadmill.com/${name}-${template_name}"
-            typeset existing_annotation=$(jq -r ".metadata.annotations[\"${annotation_key}\"] // \"\"" <<< $o_object)
-            if [[ $existing_annotation == $slugged ]]; then
-                print "marginal: $object_name already processed for $name/$template_name, skipping"
+            # `marginal.flatheadmill.com/<name>-<template>` records the unique
+            # value whose Job we last saw SUCCEED. It is written on completion,
+            # not on creation, and outlives the Job's ttlSecondsAfterFinished GC,
+            # so finished work is never repeated even once the Job is gone.
+            typeset completed_key="marginal.flatheadmill.com/${name}-${template_name}"
+            if [[ $(jq -r ".metadata.annotations[\"${completed_key}\"] // \"\"" <<< $o_object) == $slugged ]]; then
+                print "marginal: $object_name completed for $name/$template_name ($slugged), skipping"
                 continue
+            fi
+            # The live Job (named deterministically by slug) is the authoritative
+            # record of what is started for this unique value. Reconcile its state:
+            #   succeeded          -> record completion now, then skip.
+            #   Failed             -> the attempt is broken (backoffLimit or
+            #                         activeDeadlineSeconds); delete and recreate.
+            #   active / just-made -> in progress; do not start a duplicate.
+            # Anything else (no Job, or one just deleted) falls through to create.
+            typeset job_json=$(kubectl -n $namespace get job $slugged -o json 2>/dev/null)
+            if [[ -n $job_json ]]; then
+                if (( $(jq '.status.succeeded // 0' <<< $job_json) )); then
+                    kubectl annotate --overwrite ${api_version:l} $object_name \
+                        "${completed_key}=${slugged}" 2>/dev/null || true
+                    print "marginal: $object_name job $slugged succeeded, marked complete"
+                    continue
+                elif [[ -n $(jq -r '.status.conditions[]? | select(.type == "Failed" and .status == "True") | .reason' <<< $job_json) ]]; then
+                    print "marginal: $object_name job $slugged failed, recreating"
+                    kubectl -n $namespace delete job $slugged --ignore-not-found > /dev/null 2>&1
+                else
+                    print "marginal: $object_name job $slugged in progress, skipping"
+                    continue
+                fi
             fi
             manifest=$(
                 jq --argjson args "$(
@@ -184,14 +209,14 @@ function schedule {
             manifest=$(
                 gojq --yaml-output --argjson object $o_object $patch <<< $manifest
             )
+            #! Completion is recorded when the Job's success is observed above,
+            #! never here on creation — a Job that later fails is retried, not
+            #! mistaken for done.
             if (( MARGINAL_DRY_RUN )); then
                 print $manifest
-            elif kubectl apply -f - <<< $manifest; then
-                kubectl annotate --overwrite ${api_version:l} $object_name \
-                    "${annotation_key}=${slugged}" 2>/dev/null || true
             else
-                kubectl --namespace $namespace get job $slugged > /dev/null ||
-                    abend 'unable to create job'
+                kubectl apply -f - <<< $manifest || abend 'unable to create job'
+                print "marginal: $object_name started job $slugged for $name/$template_name"
             fi
         done
     done
