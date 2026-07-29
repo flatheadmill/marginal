@@ -12,6 +12,14 @@ kubernetes:
   kind: MarginalJob
   executeHookOnEvent: [Added, Modified, Deleted]
   allowFailure: true
+- name: marginal-managed-jobs
+  apiVersion: batch/v1
+  kind: Job
+  executeHookOnEvent: [Added, Modified]
+  labelSelector:
+    matchLabels:
+      marginal.flatheadmill.com/managed: "true"
+  allowFailure: true
 settings:
   executionMinInterval: 5s
   executionBurst: 1
@@ -44,6 +52,13 @@ EOF
                     apiVersion: "marginal.flatheadmill.com/v1",
                     kind: "MarginalJob",
                     executeHookOnEvent: ["Added", "Modified", "Deleted"],
+                    allowFailure: true
+                }] + [{
+                    name: "marginal-managed-jobs",
+                    apiVersion: "batch/v1",
+                    kind: "Job",
+                    executeHookOnEvent: ["Added", "Modified"],
+                    labelSelector: { matchLabels: { "marginal.flatheadmill.com/managed": "true" } },
                     allowFailure: true
                 }]
             ),

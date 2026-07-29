@@ -131,7 +131,7 @@ function schedule {
             shift 5
             (( hit && $on[(Ie)$o_event_type] )) || continue
             if [[ $o_event_type = modified ]]; then
-                print would run jq
+                printf '%s\n' 'would run jq'
             fi
             env=$(jq "$env" <<< $o_object) || abend 'cannot evaluate env'
             env=$(jq 'if type == "object" then [to_entries[] | {name: .key, value: (.value | tostring)}] else . end' <<< "$env")
@@ -164,7 +164,7 @@ function schedule {
             typeset job_json=$(kubectl -n $namespace get job $slugged -o json 2>/dev/null)
             if [[ -n $job_json ]]; then
                 if (( $(jq '.status.succeeded // 0' <<< $job_json) )); then
-                    kubectl annotate --overwrite ${api_version:l} $object_name \
+                    kubectl annotate --overwrite --namespace $object_namespace ${api_version:l} $object_name \
                         "${completed_key}=${slugged}" 2>/dev/null || true
                     printf '%s\n' "marginal: $object_name job $slugged succeeded, marked complete"
                 else
@@ -172,6 +172,13 @@ function schedule {
                 fi
                 continue
             fi
+            #! Stamp the originating object's coordinates and the completion
+            #! key/value onto the Job. When it reaches Succeeded, the Job-terminal
+            #! watcher (record_completion) reads these and writes the completion
+            #! annotation back onto the origin, so a restart's Synchronization
+            #! replay sees the work as done and does not re-create the Job. These
+            #! go through jq --arg (never jo) so a digit-only value is not coerced
+            #! to a JSON number, which an annotation value may not be.
             manifest=$(
                 jq --argjson args "$(
                     jo -- name=$name slugged=$slugged namespace=$namespace \
@@ -179,6 +186,11 @@ function schedule {
                         node=$object_name  \
                         env=$env
                     )" \
+                    --arg origin_kind "$api_version" \
+                    --arg origin_namespace "$object_namespace" \
+                    --arg origin_name "$object_name" \
+                    --arg completed_key "$completed_key" \
+                    --arg completed_value "$slugged" \
                 '
                     {
                         apiVersion: "batch/v1",
@@ -188,6 +200,11 @@ function schedule {
                             namespace: $args.namespace,
                             annotations: {
                                 "marginal.flatheadmill.com/name": $args.name,
+                                "marginal.flatheadmill.com/origin-kind": $origin_kind,
+                                "marginal.flatheadmill.com/origin-namespace": $origin_namespace,
+                                "marginal.flatheadmill.com/origin-name": $origin_name,
+                                "marginal.flatheadmill.com/completed-key": $completed_key,
+                                "marginal.flatheadmill.com/completed-value": $completed_value
                             },
                             labels: {
                                 "marginal.flatheadmill.com/managed": "true"
@@ -210,7 +227,7 @@ function schedule {
             #! never here on creation — a Job that later fails is retried, not
             #! mistaken for done.
             if (( MARGINAL_DRY_RUN )); then
-                print $manifest
+                printf '%s\n' "$manifest"
             else
                 kubectl apply -f - <<< $manifest || abend 'unable to create job'
                 printf '%s\n' "marginal: $object_name started job $slugged for $name/$template_name"
