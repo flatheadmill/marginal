@@ -182,7 +182,7 @@ function schedule {
             manifest=$(
                 jq --argjson args "$(
                     jo -- name=$name slugged=$slugged namespace=$namespace \
-                        when=$(date --iso=ns) \
+                        when=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
                         node=$object_name  \
                         env=$env
                     )" \
