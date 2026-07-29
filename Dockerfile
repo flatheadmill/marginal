@@ -1,4 +1,4 @@
-FROM harbor.acreops.org/acreops/acrectl-operator:v0.4.0
+FROM harbor.acreops.org/acreops/acrectl-operator:v0.6.0
 ADD hooks/ /hooks/
 # shell-operator runs every executable in /hooks; `hook` is the entry point, the
 # .zsh files are sourced libraries and must not be run.
