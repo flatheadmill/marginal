@@ -150,7 +150,7 @@ function schedule {
             # so finished work is never repeated even once the Job is gone.
             typeset completed_key="marginal.flatheadmill.com/${name}-${template_name}"
             if [[ $(jq -r ".metadata.annotations[\"${completed_key}\"] // \"\"" <<< $o_object) == $slugged ]]; then
-                print "marginal: $object_name completed for $name/$template_name ($slugged), skipping"
+                printf '%s\n' "marginal: $object_name completed for $name/$template_name ($slugged), skipping"
                 continue
             fi
             # The live Job (named deterministically by slug) is the record of what
@@ -166,9 +166,9 @@ function schedule {
                 if (( $(jq '.status.succeeded // 0' <<< $job_json) )); then
                     kubectl annotate --overwrite ${api_version:l} $object_name \
                         "${completed_key}=${slugged}" 2>/dev/null || true
-                    print "marginal: $object_name job $slugged succeeded, marked complete"
+                    printf '%s\n' "marginal: $object_name job $slugged succeeded, marked complete"
                 else
-                    print "marginal: $object_name job $slugged present, skipping"
+                    printf '%s\n' "marginal: $object_name job $slugged present, skipping"
                 fi
                 continue
             fi
@@ -213,7 +213,7 @@ function schedule {
                 print $manifest
             else
                 kubectl apply -f - <<< $manifest || abend 'unable to create job'
-                print "marginal: $object_name started job $slugged for $name/$template_name"
+                printf '%s\n' "marginal: $object_name started job $slugged for $name/$template_name"
             fi
         done
     done
