@@ -153,27 +153,24 @@ function schedule {
                 print "marginal: $object_name completed for $name/$template_name ($slugged), skipping"
                 continue
             fi
-            # The live Job (named deterministically by slug) is the authoritative
-            # record of what is started for this unique value. Reconcile its state:
-            #   succeeded          -> record completion now, then skip.
-            #   Failed             -> the attempt is broken (backoffLimit or
-            #                         activeDeadlineSeconds); delete and recreate.
-            #   active / just-made -> in progress; do not start a duplicate.
-            # Anything else (no Job, or one just deleted) falls through to create.
+            # The live Job (named deterministically by slug) is the record of what
+            # is started for this unique value. We never delete it:
+            #   succeeded -> record completion now, then skip.
+            #   present   -> in progress OR finished-but-not-yet-GC'd; leave it.
+            # A failed Job is retried only once its own ttlSecondsAfterFinished GC
+            # removes it, at which point it is missing below and recreated. So all
+            # retry policy lives in the MarginalJob (backoffLimit, activeDeadline,
+            # ttlSecondsAfterFinished) — the operator never forces it.
             typeset job_json=$(kubectl -n $namespace get job $slugged -o json 2>/dev/null)
             if [[ -n $job_json ]]; then
                 if (( $(jq '.status.succeeded // 0' <<< $job_json) )); then
                     kubectl annotate --overwrite ${api_version:l} $object_name \
                         "${completed_key}=${slugged}" 2>/dev/null || true
                     print "marginal: $object_name job $slugged succeeded, marked complete"
-                    continue
-                elif [[ -n $(jq -r '.status.conditions[]? | select(.type == "Failed" and .status == "True") | .reason' <<< $job_json) ]]; then
-                    print "marginal: $object_name job $slugged failed, recreating"
-                    kubectl -n $namespace delete job $slugged --ignore-not-found > /dev/null 2>&1
                 else
-                    print "marginal: $object_name job $slugged in progress, skipping"
-                    continue
+                    print "marginal: $object_name job $slugged present, skipping"
                 fi
+                continue
             fi
             manifest=$(
                 jq --argjson args "$(
