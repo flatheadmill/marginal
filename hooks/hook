@@ -2,6 +2,7 @@
 
 source ${0:a:h}/config.zsh
 source ${0:a:h}/schedule.zsh
+source ${0:a:h}/complete.zsh
 
 function :args {
     eval "$(args -b ,config -- "$@")"
@@ -28,23 +29,44 @@ function :execute {
 
         case $btype in
             Synchronization)
-                if [[ $binding == marginaljobs ]]; then
-                    continue
-                fi
-                jq -c '.objects[]?.object // empty' <<< "$entry" | while IFS= read -r obj; do
-                    schedule --event-type added --object "$(jq -c <<< "$obj")"
-                done
+                case $binding in
+                    marginaljobs)
+                        continue
+                        ;;
+                    marginal-managed-jobs)
+                        #! Startup catch-up: any managed Job already Succeeded gets
+                        #! its completion propagated now, closing the window where a
+                        #! Job finished while the operator was down.
+                        jq -c '.objects[]?.object // empty' <<< "$entry" | while IFS= read -r obj; do
+                            record_completion --object "$(jq -c <<< "$obj")"
+                        done
+                        ;;
+                    *)
+                        jq -c '.objects[]?.object // empty' <<< "$entry" | while IFS= read -r obj; do
+                            schedule --event-type added --object "$(jq -c <<< "$obj")"
+                        done
+                        ;;
+                esac
                 ;;
             Event)
-                if [[ $binding == marginaljobs ]]; then
-                    print "marginal: MarginalJob change detected, restarting to reconfigure"
-                    kill 1
-                    return
-                fi
-                typeset watch_event object
-                watch_event=$(jq -r '.watchEvent' <<< "$entry")
-                object=$(jq -c '.object' <<< "$entry")
-                schedule --event-type "${watch_event:l}" --object "$object"
+                case $binding in
+                    marginaljobs)
+                        printf '%s\n' "marginal: MarginalJob change detected, restarting to reconfigure"
+                        kill 1
+                        return
+                        ;;
+                    marginal-managed-jobs)
+                        typeset object
+                        object=$(jq -c '.object' <<< "$entry")
+                        record_completion --object "$object"
+                        ;;
+                    *)
+                        typeset watch_event object
+                        watch_event=$(jq -r '.watchEvent' <<< "$entry")
+                        object=$(jq -c '.object' <<< "$entry")
+                        schedule --event-type "${watch_event:l}" --object "$object"
+                        ;;
+                esac
                 ;;
         esac
     done
