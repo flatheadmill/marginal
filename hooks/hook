@@ -1,19 +1,90 @@
 #!/usr/bin/env zshctl
 
 source ${0:a:h}/config.zsh
+source ${0:a:h}/schedule.zsh
+source ${0:a:h}/complete.zsh
 
 function :args {
-    eval "$(args -b ,config  -- "$@")"
+    eval "$(args -b ,config -- "$@")"
 }
 
 function :execute {
+    setopt localoptions pipefail noxtrace noverbose
     if (( o_config )); then
         config
-    elif [[ $MARGINAL_DUMP_BINDING = 1 ]]; then
-        jq < $BINDING_CONTEXT_PATH
-    else
-        print 'hello, world'
+        return
     fi
+
+    if [[ $MARGINAL_DUMP_BINDING = 1 ]]; then
+        # Debugging must not print Secret data, embedded manifests, or env values.
+        jq '
+            def identity: {apiVersion, kind, metadata: (.metadata | {name, namespace, uid, resourceVersion})};
+            map({type, binding, watchEvent, object: (.object // {} | identity),
+                objects: [.objects[]?.object | identity]})
+        ' < "$BINDING_CONTEXT_PATH"
+        return
+    fi
+
+    # Declare once: bare `typeset object` in a later iteration prints its old
+    # value, including the complete Secret, under normal Zsh options.
+    typeset binding_context entries entry btype binding objects obj object watch_event
+    integer failed=0 reconfigure=0
+    binding_context=$(< "$BINDING_CONTEXT_PATH")
+    entries=$(jq -c '.[]' <<< "$binding_context") || return 1
+
+    for entry in "${(@f)entries}"; do
+        btype=$(jq -r '.type' <<< "$entry")
+        binding=$(jq -r '.binding' <<< "$entry")
+
+        case $btype in
+            Synchronization)
+                case $binding in
+                    marginaljobs)
+                        continue
+                        ;;
+                    marginal-managed-jobs)
+                        #! Startup catch-up: any managed Job already Succeeded gets
+                        #! its completion propagated now, closing the window where a
+                        #! Job finished while the operator was down.
+                        objects=$(jq -c '.objects[]?.object // empty' <<< "$entry") || { failed=1; continue; }
+                        for obj in "${(@f)objects}"; do
+                            [[ -n $obj ]] || continue
+                            record_completion --object "$obj" || failed=1
+                        done
+                        ;;
+                    *)
+                        objects=$(jq -c '.objects[]?.object // empty' <<< "$entry") || { failed=1; continue; }
+                        for obj in "${(@f)objects}"; do
+                            [[ -n $obj ]] || continue
+                            schedule --event-type added --object "$obj" --listener "$binding" || failed=1
+                        done
+                        ;;
+                esac
+                ;;
+            Event)
+                case $binding in
+                    marginaljobs)
+                        reconfigure=1
+                        ;;
+                    marginal-managed-jobs)
+                        object=$(jq -c '.object' <<< "$entry")
+                        record_completion --object "$object" || failed=1
+                        ;;
+                    *)
+                        watch_event=$(jq -r '.watchEvent' <<< "$entry")
+                        object=$(jq -c '.object' <<< "$entry")
+                        schedule --event-type "${watch_event:l}" --object "$object" --listener "$binding" || failed=1
+                        ;;
+                esac
+                ;;
+        esac
+    done
+    (( failed == 0 )) || return 1
+    if (( reconfigure )); then
+        printf '%s\n' "marginal: MarginalJob change detected, restarting to reconfigure"
+        kill 1 || return 1
+    fi
+    return 0
 }
 
 # vim: ft=zsh :

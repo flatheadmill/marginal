@@ -66,6 +66,7 @@ function schedule {
                             ((.executeHookOnEvent // [])[]),
                             (.modificationFilter // "1"),
                             (.env // "[]"),
+                            (.uniqueKey // ""),
                             (.patch // "."),
                             (($defaults * .spec) | @json)
                     )
@@ -78,11 +79,16 @@ function schedule {
     integer selector_count values_count hit namespace_count
     typeset kind api_version slugged manifest
     integer template_count filtered on_count cm_exists
-    typeset template_name template_namespace on=() jq cm_name cm_namespace
+    typeset template_name template_namespace on=() jq cm_name cm_namespace unique_value job_json completed_key origin
     while (( $# )); do
         namespace=${1:-} name=${2:-} kind=${3:-} api_version=${4:-} selector_count=${5:-}
         shift 5
         hit=1
+        # The binding already applied the watch's selector. Do not dispatch an
+        # event to unrelated MarginalJobs of another kind.
+        if (( ${#o_listener} )) && (( ! $o_listener[(Ie)$name] )); then
+            hit=0
+        fi
         while (( selector_count-- )); do
             key=${1:-} operator=${2:-} values_count=${3:-}
             shift 3
@@ -126,21 +132,73 @@ function schedule {
             shift 2
             on=( "${(@A)@[1,$on_count]:l}" )
             shift $on_count
-            filter=${1:-} env=${2:-} patch=${3:-} template=${4:-}
-            shift 4
+            filter=${1:-} env=${2:-} unique_key=${3:-} patch=${4:-} template=${5:-}
+            shift 5
             (( hit && $on[(Ie)$o_event_type] )) || continue
-            if [[ $o_event_type = modified ]]; then
-                print would run jq
+            if (( $on[(Ie)modified] )) && [[ -z $unique_key ]]; then
+                printf 'marginal: %s/%s template %s requires an explicit uniqueKey for Modified; skipping\n' \
+                    "$namespace" "$name" "$template_name" >&2
+                continue
             fi
-            env=$(jq $env <<< $o_object) || abend 'cannot evaluate env'
-            slugged=$name-$(slugged $object_namespace/$object_name)-$resource_version
+            unique_key=${unique_key:-.metadata.uid}
+            if ! unique_value=$(jq -er "$unique_key" <<< "$o_object" 2>/dev/null) || [[ -z $unique_value ]]; then
+                printf 'marginal: %s/%s template %s has no valid uniqueKey yet; skipping\n' \
+                    "$namespace" "$name" "$template_name" >&2
+                continue
+            fi
+            env=$(jq "$env" <<< $o_object) || abend 'cannot evaluate env'
+            env=$(jq 'if type == "object" then [to_entries[] | {name: .key, value: (.value | tostring)}] else . end' <<< "$env")
+            slugged=$name-$template_name-$(slugged "$unique_value")
+            # `marginal.flatheadmill.com/<name>-<template>` records the unique
+            # value whose Job we last saw SUCCEED. It is written on completion,
+            # not on creation, and outlives the Job's ttlSecondsAfterFinished GC,
+            # so finished work is never repeated even once the Job is gone.
+            completed_key="marginal.flatheadmill.com/${name}-${template_name}"
+            if [[ $(jq -r ".metadata.annotations[\"${completed_key}\"] // \"\"" <<< $o_object) == $slugged ]]; then
+                printf '%s\n' "marginal: $object_name completed for $name/$template_name ($slugged), skipping"
+                continue
+            fi
+            # The live Job (named deterministically by slug) is the record of what
+            # is started for this unique value. We never delete it:
+            #   succeeded -> record completion now, then skip.
+            #   present   -> in progress OR finished-but-not-yet-GC'd; leave it.
+            # Kubernetes retries Pods with exponential backoff within this Job's
+            # backoffLimit and activeDeadlineSeconds. A terminal failure is not
+            # completion. After GC, another source event or startup can recreate
+            # it; TTL deletion by itself is not a retry trigger.
+            job_json=$(kubectl -n $namespace get job $slugged --ignore-not-found -o json) || return 1
+            if [[ -n $job_json ]]; then
+                if jq -e 'any(.status.conditions[]?; .type == "Complete" and .status == "True")' <<< "$job_json" >/dev/null; then
+                    origin=$(kubectl get ${api_version:l} "$object_name" --namespace "$object_namespace" --ignore-not-found -o name) || return 1
+                    if [[ -n $origin ]]; then
+                        kubectl annotate --overwrite --namespace $object_namespace ${api_version:l} $object_name \
+                            "${completed_key}=${slugged}" || return 1
+                        printf '%s\n' "marginal: $object_name job $slugged succeeded, marked complete"
+                    fi
+                else
+                    printf '%s\n' "marginal: $object_name job $slugged present, skipping"
+                fi
+                continue
+            fi
+            #! Stamp the originating object's coordinates and the completion
+            #! key/value onto the Job. When it reaches Succeeded, the Job-terminal
+            #! watcher (record_completion) reads these and writes the completion
+            #! annotation back onto the origin, so a restart's Synchronization
+            #! replay sees the work as done and does not re-create the Job. These
+            #! go through jq --arg (never jo) so a digit-only value is not coerced
+            #! to a JSON number, which an annotation value may not be.
             manifest=$(
                 jq --argjson args "$(
                     jo -- name=$name slugged=$slugged namespace=$namespace \
-                        when=$(date --iso=ns) \
+                        when=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
                         node=$object_name  \
                         env=$env
                     )" \
+                    --arg origin_kind "$api_version" \
+                    --arg origin_namespace "$object_namespace" \
+                    --arg origin_name "$object_name" \
+                    --arg completed_key "$completed_key" \
+                    --arg completed_value "$slugged" \
                 '
                     {
                         apiVersion: "batch/v1",
@@ -150,6 +208,11 @@ function schedule {
                             namespace: $args.namespace,
                             annotations: {
                                 "marginal.flatheadmill.com/name": $args.name,
+                                "marginal.flatheadmill.com/origin-kind": $origin_kind,
+                                "marginal.flatheadmill.com/origin-namespace": $origin_namespace,
+                                "marginal.flatheadmill.com/origin-name": $origin_name,
+                                "marginal.flatheadmill.com/completed-key": $completed_key,
+                                "marginal.flatheadmill.com/completed-value": $completed_value
                             },
                             labels: {
                                 "marginal.flatheadmill.com/managed": "true"
@@ -165,17 +228,17 @@ function schedule {
                     }
                 ' <<< $template
             )
-            manifests[$namespace/$name]=$(
+            manifest=$(
                 gojq --yaml-output --argjson object $o_object $patch <<< $manifest
             )
+            #! Completion is recorded when the Job's success is observed above,
+            #! never here on creation — a Job that later fails remains incomplete.
+            if (( MARGINAL_DRY_RUN )); then
+                printf '%s\n' "$manifest"
+            else
+                kubectl apply -f - <<< $manifest || return 1
+                printf '%s\n' "marginal: $object_name started job $slugged for $name/$template_name"
+            fi
         done
-    done
-    for manifest in "${(@v)manifests}"; do
-        print $manifests
-        continue
-        if ! kubectl apply -f - <<< $manifest; then
-            kubectl --namespace $namespace get job $slugged > /dev/null ||
-                abend 'unable to create job'
-        fi
     done
 }
