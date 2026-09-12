@@ -17,10 +17,8 @@ function record_completion {
     #! Complete condition, so it is never marked done here. Kubernetes owns Pod
     #! backoff within the Job; terminal failure and TTL cleanup do not themselves
     #! schedule another Job.
-    integer succeeded complete_cond
-    succeeded=$(jq -r '.status.succeeded // 0' <<< $object)
-    complete_cond=$(jq -r '[.status.conditions[]? | select(.type == "Complete" and .status == "True")] | length' <<< $object)
-    (( succeeded >= 1 || complete_cond >= 1 )) || return 0
+    # Successful Pods are not sufficient for a multi-completion Job.
+    jq -e 'any(.status.conditions[]?; .type == "Complete" and .status == "True")' <<< "$object" >/dev/null || return 0
 
     typeset job_name origin_kind origin_namespace origin_name completed_key completed_value
     job_name=$(jq -r '.metadata.name // ""' <<< $object)
@@ -32,7 +30,7 @@ function record_completion {
 
     #! A managed Job with no correlation stamp predates this watcher; there is
     #! nothing to propagate, and `schedule`'s own on-success annotate still covers it.
-    [[ -n $origin_kind && -n $origin_name && -n $completed_key && -n $completed_value ]] || return
+    [[ -n $origin_kind && -n $origin_name && -n $completed_key && -n $completed_value ]] || return 0
 
     #! `--namespace` is required for a namespaced origin (e.g. the cert Secret) and
     #! harmlessly ignored for a cluster-scoped one (e.g. a Node), so always pass it
@@ -41,10 +39,17 @@ function record_completion {
     typeset -a ns_arg=()
     [[ -n $origin_namespace ]] && ns_arg=( --namespace $origin_namespace )
 
+    # Deleted origins cannot carry a marker. A failed lookup is different and
+    # must remain retryable, including a transient authorization/API failure.
+    typeset origin
+    origin=$(kubectl get "$origin_kind" "$origin_name" "$ns_arg[@]" --ignore-not-found -o name) || return 1
+    [[ -n $origin ]] || return 0
+
     if kubectl annotate --overwrite $ns_arg ${origin_kind:l} $origin_name \
-        "${completed_key}=${completed_value}" 2>/dev/null; then
+        "${completed_key}=${completed_value}"; then
         printf '%s\n' "marginal: job $job_name succeeded, marked $origin_kind/$origin_name complete ($completed_value)"
     else
         printf '%s\n' "marginal: job $job_name succeeded but could not annotate $origin_kind/$origin_name" >&2
+        return 1
     fi
 }

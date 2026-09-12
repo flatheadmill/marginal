@@ -23,6 +23,8 @@ function kubectl {
         (( ++created ))
     elif [[ $1 = annotate ]]; then
         (( ++annotated ))
+    elif [[ "$*" = 'get Secret '* || "$*" = 'get secret '* ]]; then
+        printf 'secret/cert\n'
     else
         printf 'unexpected kubectl: %s\n' "$*" >&2
         return 1
@@ -69,7 +71,7 @@ function :execute {
     check 'active Job completion events are successful no-ops' record_completion --object '{"status":{"active":1}}'
     check 'failed Jobs are not marked complete' record_completion --object '{"status":{"failed":1,"conditions":[{"type":"Failed","status":"True"}]}}'
     check 'non-success events wrote no completion marker' test $annotated -eq 0
-    job_state=$(gojq --yaml-input '.status.succeeded=1' <<< "$created_manifest")
+    job_state=$(gojq --yaml-input '.status={succeeded:1,conditions:[{type:"Complete",status:"True"}]}' <<< "$created_manifest")
     check 'observed success records completion on the origin' record_completion --object "$job_state"
     check 'success wrote one completion marker' test $annotated -eq 1
 }
