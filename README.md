@@ -67,3 +67,12 @@ We call it Marginal because it operates at the margins - the edge cases where st
 - Testing with fixture data
 - Shell Operator binding examples
 - Extending with new event sources
+
+## Retry policy
+
+Marginal reacts to resource events and replays current objects at startup.
+Kubernetes Jobs own exponential Pod backoff through `backoffLimit` and
+`activeDeadlineSeconds`; Marginal does not poll to recreate failed Jobs.
+Completion is recorded only after observed success. A terminal failed Job is
+left failed; TTL cleanup alone does not trigger another run. Use a content-based
+`uniqueKey` so later events and startup skip work that already succeeded.

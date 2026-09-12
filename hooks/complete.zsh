@@ -14,12 +14,13 @@ function record_completion {
     typeset object=$o_object
 
     #! Act only on a terminal Succeeded Job. A failed Job leaves succeeded=0 and no
-    #! Complete condition, so it is left to the MarginalJob's own retry policy
-    #! (backoffLimit / ttlSecondsAfterFinished) — never marked done here.
+    #! Complete condition, so it is never marked done here. Kubernetes owns Pod
+    #! backoff within the Job; terminal failure and TTL cleanup do not themselves
+    #! schedule another Job.
     integer succeeded complete_cond
     succeeded=$(jq -r '.status.succeeded // 0' <<< $object)
     complete_cond=$(jq -r '[.status.conditions[]? | select(.type == "Complete" and .status == "True")] | length' <<< $object)
-    (( succeeded >= 1 || complete_cond >= 1 )) || return
+    (( succeeded >= 1 || complete_cond >= 1 )) || return 0
 
     typeset job_name origin_kind origin_namespace origin_name completed_key completed_value
     job_name=$(jq -r '.metadata.name // ""' <<< $object)

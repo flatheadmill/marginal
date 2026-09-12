@@ -84,6 +84,11 @@ function schedule {
         namespace=${1:-} name=${2:-} kind=${3:-} api_version=${4:-} selector_count=${5:-}
         shift 5
         hit=1
+        # The binding already applied the watch's selector. Do not dispatch an
+        # event to unrelated MarginalJobs of another kind.
+        if (( ${#o_listener} )) && (( ! $o_listener[(Ie)$name] )); then
+            hit=0
+        fi
         while (( selector_count-- )); do
             key=${1:-} operator=${2:-} values_count=${3:-}
             shift 3
@@ -157,11 +162,12 @@ function schedule {
             # is started for this unique value. We never delete it:
             #   succeeded -> record completion now, then skip.
             #   present   -> in progress OR finished-but-not-yet-GC'd; leave it.
-            # A failed Job is retried only once its own ttlSecondsAfterFinished GC
-            # removes it, at which point it is missing below and recreated. So all
-            # retry policy lives in the MarginalJob (backoffLimit, activeDeadline,
-            # ttlSecondsAfterFinished) — the operator never forces it.
-            typeset job_json=$(kubectl -n $namespace get job $slugged -o json 2>/dev/null)
+            # Kubernetes retries Pods with exponential backoff within this Job's
+            # backoffLimit and activeDeadlineSeconds. A terminal failure is not
+            # completion. After GC, another source event or startup can recreate
+            # it; TTL deletion by itself is not a retry trigger.
+            typeset job_json
+            job_json=$(kubectl -n $namespace get job $slugged --ignore-not-found -o json) || return 1
             if [[ -n $job_json ]]; then
                 if (( $(jq '.status.succeeded // 0' <<< $job_json) )); then
                     kubectl annotate --overwrite --namespace $object_namespace ${api_version:l} $object_name \
@@ -224,8 +230,7 @@ function schedule {
                 gojq --yaml-output --argjson object $o_object $patch <<< $manifest
             )
             #! Completion is recorded when the Job's success is observed above,
-            #! never here on creation — a Job that later fails is retried, not
-            #! mistaken for done.
+            #! never here on creation — a Job that later fails remains incomplete.
             if (( MARGINAL_DRY_RUN )); then
                 printf '%s\n' "$manifest"
             else

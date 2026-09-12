@@ -43,7 +43,7 @@ function :execute {
                         ;;
                     *)
                         jq -c '.objects[]?.object // empty' <<< "$entry" | while IFS= read -r obj; do
-                            schedule --event-type added --object "$(jq -c <<< "$obj")"
+                            schedule --event-type added --object "$(jq -c <<< "$obj")" --listener "$binding"
                         done
                         ;;
                 esac
@@ -64,7 +64,7 @@ function :execute {
                         typeset watch_event object
                         watch_event=$(jq -r '.watchEvent' <<< "$entry")
                         object=$(jq -c '.object' <<< "$entry")
-                        schedule --event-type "${watch_event:l}" --object "$object"
+                        schedule --event-type "${watch_event:l}" --object "$object" --listener "$binding"
                         ;;
                 esac
                 ;;
