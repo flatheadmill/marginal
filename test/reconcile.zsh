@@ -38,8 +38,8 @@ function reconcile {
 function :execute {
     typeset object='{"metadata":{"name":"cert","namespace":"certificates","resourceVersion":"17","uid":"test","annotations":{"revision":"one"},"labels":{"reload":"yes"}}}'
     typeset listeners='{"items":[{"metadata":{"name":"reload","namespace":"marginal"},"spec":{"apiVersion":"v1","kind":"Secret","resyncSchedule":"* * * * *","objectFilter":{"matchExpressions":[{"key":"reload","operator":"In","values":["yes"]}]},"jobTemplates":[{"name":"tls","executeHookOnEvent":["Added","Modified"],"uniqueKey":".metadata.annotations.revision","spec":{"template":{"spec":{"containers":[{"name":"reload","image":"test","env":[]}]}}}}]}}]}'
-    typeset job_state=missing created_manifest configuration completed
-    integer created=0 annotated=0
+    typeset job_state=missing created_manifest configuration completed expression event
+    integer created=0 annotated=0 before
 
     configuration=$(config | gojq --yaml-input '.')
     check 'Marginal is event-driven even for a legacy resync field' jq -e \
@@ -56,7 +56,8 @@ function :execute {
     check 'a later source event can retry a collected failed Job' reconcile
     check 'retry created a second Job' test $created -eq 2
     completed=$(gojq --yaml-input -r '.metadata.name' <<< "$created_manifest")
-    object=$(jq --arg completed "$completed" '.metadata.annotations["marginal.flatheadmill.com/reload-tls"]=$completed' <<< "$object")
+    object=$(jq --arg completed "$completed" '.metadata.annotations["marginal.flatheadmill.com/reload-tls"]=$completed | .metadata.resourceVersion="18"' <<< "$object")
+    check 'completion bookkeeping does not create work after Job cleanup' schedule --event-type modified --object "$object" --listener reload
     check 'completion survives Job garbage collection' reconcile
     check 'successful work was not repeated' test $created -eq 2
     object=$(jq 'del(.metadata.annotations["marginal.flatheadmill.com/reload-tls"])' <<< "$object")
@@ -74,4 +75,34 @@ function :execute {
     job_state=$(gojq --yaml-input '.status={succeeded:1,conditions:[{type:"Complete",status:"True"}]}' <<< "$created_manifest")
     check 'observed success records completion on the origin' record_completion --object "$job_state"
     check 'success wrote one completion marker' test $annotated -eq 1
+
+    job_state=missing
+    before=$created
+    object=$(jq '.metadata.annotations.revision="two" | .metadata.resourceVersion="19"' <<< "$object")
+    check 'a new producer revision creates work' schedule --event-type modified --object "$object" --listener reload
+    check 'one new Job was created' test $created -eq $(( before + 1 ))
+
+    before=$created
+    listeners=$(jq 'del(.items[0].spec.jobTemplates[0].uniqueKey)' <<< "$listeners")
+    for event in added modified; do
+        check 'a Modified template needs an explicit key, including on replay' schedule --event-type $event --object "$object" --listener reload
+    done
+    for expression in '.missing' 'null' 'empty' '""' 'bad('; do
+        listeners=$(jq --arg expression "$expression" '.items[0].spec.jobTemplates[0].uniqueKey=$expression' <<< "$listeners")
+        check 'invalid or unpublished keys skip without retries' schedule --event-type modified --object "$object" --listener reload
+    done
+    check 'skipped keys created no Jobs' test $created -eq $before
+
+    listeners=$(jq '.items[0].spec.jobTemplates[0].uniqueKey=".metadata.annotations.ready"' <<< "$listeners")
+    check 'an unpublished producer key is skipped' reconcile
+    object=$(jq '.metadata.annotations.ready="published"' <<< "$object")
+    check 'a later published key creates work' reconcile
+    check 'publication created one Job' test $created -eq $(( before + 1 ))
+
+    listeners=$(jq 'del(.items[0].spec.jobTemplates[0].uniqueKey) | .items[0].spec.jobTemplates[0].executeHookOnEvent=["Added","Deleted"]' <<< "$listeners")
+    object=$(jq '.metadata.uid="original-uid"' <<< "$object")
+    for event in added deleted; do
+        check 'Added/Deleted keep the UID default' schedule --event-type $event --object "$object" --listener reload
+        check 'UID Job name is unchanged' test "$(gojq --yaml-input -r '.metadata.name' <<< "$created_manifest")" = reload-tls-b12eed94
+    done
 }

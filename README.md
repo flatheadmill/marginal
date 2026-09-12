@@ -85,14 +85,8 @@ a positive successful-Pod count does not.
 
 ## Work keys
 
-Templates subscribing to `Modified` must provide an explicit `uniqueKey`. Use
-a producer's revision field or a digest of meaningful content that does not
-change when Marginal writes its completion annotation. For certificate renewal,
-the existing expiry annotation supplies that revision; Marginal maintains no
-separate counter. Templates subscribing only to `Added` or `Deleted` retain the
-object-UID default.
-
-An invalid expression, a null/empty result, or multiple results skips that
-template with an identity-only diagnostic. If the producer has not published
-its key, a later source event can schedule it; the missing key does not cause
-endless controller retries. Valid keys keep the existing deterministic Job names.
+Templates subscribing to `Modified` need an explicit `uniqueKey`: a producer
+revision or content digest unchanged by completion bookkeeping. Certificate
+renewal already supplies an expiry annotation. Added/Deleted-only templates
+default to the object UID. A failed, null, or empty key lookup skips the template
+until a later source event, logging its identity and reason without source values.
