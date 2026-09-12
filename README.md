@@ -71,8 +71,14 @@ We call it Marginal because it operates at the margins - the edge cases where st
 ## Retry policy
 
 Marginal reacts to resource events and replays current objects at startup.
+Transient scheduling and completion API errors fail the hook and are retried by
+Shell Operator with exponential backoff. A later successful event in the same
+batch does not erase an earlier failure. Debug binding output includes object
+identities only, never Secret data or annotations.
 Kubernetes Jobs own exponential Pod backoff through `backoffLimit` and
 `activeDeadlineSeconds`; Marginal does not poll to recreate failed Jobs.
 Completion is recorded only after observed success. A terminal failed Job is
 left failed; TTL cleanup alone does not trigger another run. Use a content-based
 `uniqueKey` so later events and startup skip work that already succeeded.
+For parallel Jobs, only the terminal `Complete=True` condition means success;
+a positive successful-Pod count does not.
