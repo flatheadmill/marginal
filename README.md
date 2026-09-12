@@ -82,3 +82,17 @@ left failed; TTL cleanup alone does not trigger another run. Use a content-based
 `uniqueKey` so later events and startup skip work that already succeeded.
 For parallel Jobs, only the terminal `Complete=True` condition means success;
 a positive successful-Pod count does not.
+
+## Work keys
+
+Templates subscribing to `Modified` must provide an explicit `uniqueKey`. Use
+a producer's revision field or a digest of meaningful content that does not
+change when Marginal writes its completion annotation. For certificate renewal,
+the existing expiry annotation supplies that revision; Marginal maintains no
+separate counter. Templates subscribing only to `Added` or `Deleted` retain the
+object-UID default.
+
+An invalid expression, a null/empty result, or multiple results skips that
+template with an identity-only diagnostic. If the producer has not published
+its key, a later source event can schedule it; the missing key does not cause
+endless controller retries. Valid keys keep the existing deterministic Job names.

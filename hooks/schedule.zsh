@@ -79,7 +79,7 @@ function schedule {
     integer selector_count values_count hit namespace_count
     typeset kind api_version slugged manifest
     integer template_count filtered on_count cm_exists
-    typeset template_name template_namespace on=() jq cm_name cm_namespace unique_value job_json completed_key origin
+    typeset template_name template_namespace on=() jq cm_name cm_namespace unique_result unique_value job_json completed_key origin
     while (( $# )); do
         namespace=${1:-} name=${2:-} kind=${3:-} api_version=${4:-} selector_count=${5:-}
         shift 5
@@ -135,18 +135,42 @@ function schedule {
             filter=${1:-} env=${2:-} unique_key=${3:-} patch=${4:-} template=${5:-}
             shift 5
             (( hit && $on[(Ie)$o_event_type] )) || continue
-            if [[ $o_event_type = modified ]]; then
-                printf '%s\n' 'would run jq'
+            if (( $on[(Ie)modified] )) && [[ -z $unique_key ]]; then
+                printf 'marginal: %s/%s template %s requires an explicit uniqueKey for Modified; skipping\n' \
+                    "$namespace" "$name" "$template_name" >&2
+                continue
+            fi
+            if [[ -z $unique_key ]]; then
+                unique_key='.metadata.uid'
+            fi
+            # Invalid configuration or an unpublished producer key is not a
+            # transient API error. Skip it without printing expressions/values
+            # or retaining an event that can never succeed unchanged.
+            if ! unique_result=$(jq -c "$unique_key" <<< "$o_object" 2>/dev/null); then
+                printf 'marginal: %s/%s template %s uniqueKey evaluation failed; skipping\n' \
+                    "$namespace" "$name" "$template_name" >&2
+                continue
+            fi
+            if ! jq -es '
+                length == 1 and (.[0] |
+                    if . == null then false
+                    elif type == "string" or type == "array" or type == "object" then length > 0
+                    else true end)
+            ' <<< "$unique_result" >/dev/null 2>&1; then
+                printf 'marginal: %s/%s template %s uniqueKey is absent, empty, or not a single value; skipping\n' \
+                    "$namespace" "$name" "$template_name" >&2
+                continue
+            fi
+            # Preserve the previous jq -r representation and deterministic name
+            # for valid keys, including the Added/Deleted UID defaults.
+            unique_value=$(jq -r '.' <<< "$unique_result") || return 1
+            if [[ -z $unique_value ]]; then
+                printf 'marginal: %s/%s template %s uniqueKey has an empty value; skipping\n' \
+                    "$namespace" "$name" "$template_name" >&2
+                continue
             fi
             env=$(jq "$env" <<< $o_object) || abend 'cannot evaluate env'
             env=$(jq 'if type == "object" then [to_entries[] | {name: .key, value: (.value | tostring)}] else . end' <<< "$env")
-            if [[ -z $unique_key ]]; then
-                case $o_event_type in
-                    modified) unique_key='.metadata.resourceVersion' ;;
-                    *)        unique_key='.metadata.uid' ;;
-                esac
-            fi
-            unique_value=$(jq -r "$unique_key" <<< $o_object)
             slugged=$name-$template_name-$(slugged "$unique_value")
             # `marginal.flatheadmill.com/<name>-<template>` records the unique
             # value whose Job we last saw SUCCEED. It is written on completion,
